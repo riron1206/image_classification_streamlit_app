@@ -5,5 +5,4 @@ pillow
 torch
 torchvision
 albumentations
-opencv-python
-opencv-contrib-python
+opencv-python-headless
