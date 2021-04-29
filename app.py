@@ -748,7 +748,12 @@ def main():
 
     # サイドバー ラジオボタン
     st_model = st.sidebar.radio(
-        "Select ImageNet model", ("resnet18", "resnet50", "resnet101",),
+        "Select ImageNet model",
+        (
+            "resnet18",
+            "resnet50",
+            # "resnet101",
+        ),
     )
     args.__setattr__("model", st_model)
 
