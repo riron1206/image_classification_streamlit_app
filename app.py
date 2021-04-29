@@ -1,5 +1,6 @@
 """
-画像を Streamlit 上で表示して、学習済みの mobilenet_v2(Pytorch)で分類
+画像を Streamlit 上で表示して、Pytorchのimagenetの学習済みモデルで分類
+grad-cam などの可視化選べる
 https://towardsdatascience.com/create-an-image-classification-web-app-using-pytorch-and-streamlit-f043ddf00c24
 
 Usage:
@@ -8,429 +9,644 @@ Usage:
 """
 
 # ==============================================
-# https://github.com/1Konny/gradcam_plus_plus-pytorch
-# utils.py
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam/utils/
+# image.py
 # ==============================================
 import cv2
+import numpy as np
 import torch
-
-layer_finders = {}
-
-
-def register_layer_finder(model_type):
-    def register(func):
-        layer_finders[model_type] = func
-        return func
-
-    return register
+from torchvision.transforms import Compose, Normalize, ToTensor
 
 
-def visualize_cam(mask, img, alpha=1.0):
-    """Make heatmap from mask and synthesize GradCAM result image using heatmap and img.
-    Args:
-        mask (torch.tensor): mask shape of (1, 1, H, W) and each element has value in range [0, 1]
-        img (torch.tensor): img shape of (1, 3, H, W) and each pixel value is in range [0, 1]
+def preprocess_image(img: np.ndarray, mean=None, std=None) -> torch.Tensor:
+    if std is None:
+        std = [0.5, 0.5, 0.5]
+    if mean is None:
+        mean = [0.5, 0.5, 0.5]
 
-    Return:
-        heatmap (torch.tensor): heatmap img shape of (3, H, W)
-        result (torch.tensor): synthesized GradCAM result of same shape with heatmap.
+    preprocessing = Compose([ToTensor(), Normalize(mean=mean, std=std)])
+
+    return preprocessing(img.copy()).unsqueeze(0)
+
+
+def deprocess_image(img):
+    """ see https://github.com/jacobgil/keras-grad-cam/blob/master/grad-cam.py#L65 """
+    img = img - np.mean(img)
+    img = img / (np.std(img) + 1e-5)
+    img = img * 0.1
+    img = img + 0.5
+    img = np.clip(img, 0, 1)
+    return np.uint8(img * 255)
+
+
+def show_cam_on_image(
+    img: np.ndarray,
+    mask: np.ndarray,
+    use_rgb: bool = False,
+    colormap: int = cv2.COLORMAP_JET,
+) -> np.ndarray:
+    """ This function overlays the cam mask on the image as an heatmap.
+    By default the heatmap is in BGR format.
+
+    :param img: The base image in RGB or BGR format.
+    :param mask: The cam mask.
+    :param use_rgb: Whether to use an RGB or BGR heatmap, this should be set to True if 'img' is in RGB format.
+    :param colormap: The OpenCV colormap to be used.
+    :returns: The default image with the cam overlay.
     """
-    heatmap = (255 * mask.squeeze()).type(torch.uint8).cpu().numpy()
-    heatmap = cv2.applyColorMap(heatmap, cv2.COLORMAP_JET)
-    heatmap = torch.from_numpy(heatmap).permute(2, 0, 1).float().div(255)
-    b, g, r = heatmap.split(1)
-    heatmap = torch.cat([r, g, b]) * alpha
+    heatmap = cv2.applyColorMap(np.uint8(255 * mask), colormap)
+    if use_rgb:
+        heatmap = cv2.cvtColor(heatmap, cv2.COLOR_BGR2RGB)
+    heatmap = np.float32(heatmap) / 255
 
-    result = heatmap + img.cpu()
-    result = result.div(result.max()).squeeze()
+    if np.max(img) > 1:
+        raise Exception("The input image should np.float32 in the range [0, 1]")
 
-    return heatmap, result
-
-
-@register_layer_finder("resnet")
-def find_resnet_layer(arch, target_layer_name):
-    """Find resnet layer to calculate GradCAM and GradCAM++
-
-    Args:
-        arch: default torchvision densenet models
-        target_layer_name (str): the name of layer with its hierarchical information. please refer to usages below.
-            target_layer_name = 'conv1'
-            target_layer_name = 'layer1'
-            target_layer_name = 'layer1_basicblock0'
-            target_layer_name = 'layer1_basicblock0_relu'
-            target_layer_name = 'layer1_bottleneck0'
-            target_layer_name = 'layer1_bottleneck0_conv1'
-            target_layer_name = 'layer1_bottleneck0_downsample'
-            target_layer_name = 'layer1_bottleneck0_downsample_0'
-            target_layer_name = 'avgpool'
-            target_layer_name = 'fc'
-
-    Return:
-        target_layer: found layer. this layer will be hooked to get forward/backward pass information.
-    """
-    if "layer" in target_layer_name:
-        hierarchy = target_layer_name.split("_")
-        layer_num = int(hierarchy[0].lstrip("layer"))
-        if layer_num == 1:
-            target_layer = arch.layer1
-        elif layer_num == 2:
-            target_layer = arch.layer2
-        elif layer_num == 3:
-            target_layer = arch.layer3
-        elif layer_num == 4:
-            target_layer = arch.layer4
-        else:
-            raise ValueError("unknown layer : {}".format(target_layer_name))
-
-        if len(hierarchy) >= 2:
-            bottleneck_num = int(
-                hierarchy[1].lower().lstrip("bottleneck").lstrip("basicblock")
-            )
-            target_layer = target_layer[bottleneck_num]
-
-        if len(hierarchy) >= 3:
-            target_layer = target_layer._modules[hierarchy[2]]
-
-        if len(hierarchy) == 4:
-            target_layer = target_layer._modules[hierarchy[3]]
-
-    else:
-        target_layer = arch._modules[target_layer_name]
-
-    return target_layer
-
-
-@register_layer_finder("densenet")
-def find_densenet_layer(arch, target_layer_name):
-    """Find densenet layer to calculate GradCAM and GradCAM++
-
-    Args:
-        arch: default torchvision densenet models
-        target_layer_name (str): the name of layer with its hierarchical information. please refer to usages below.
-            target_layer_name = 'features'
-            target_layer_name = 'features_transition1'
-            target_layer_name = 'features_transition1_norm'
-            target_layer_name = 'features_denseblock2_denselayer12'
-            target_layer_name = 'features_denseblock2_denselayer12_norm1'
-            target_layer_name = 'features_denseblock2_denselayer12_norm1'
-            target_layer_name = 'classifier'
-
-    Return:
-        target_layer: found layer. this layer will be hooked to get forward/backward pass information.
-    """
-
-    hierarchy = target_layer_name.split("_")
-    target_layer = arch._modules[hierarchy[0]]
-
-    if len(hierarchy) >= 2:
-        target_layer = target_layer._modules[hierarchy[1]]
-
-    if len(hierarchy) >= 3:
-        target_layer = target_layer._modules[hierarchy[2]]
-
-    if len(hierarchy) == 4:
-        target_layer = target_layer._modules[hierarchy[3]]
-
-    return target_layer
-
-
-@register_layer_finder("vgg")
-def find_vgg_layer(arch, target_layer_name):
-    """Find vgg layer to calculate GradCAM and GradCAM++
-
-    Args:
-        arch: default torchvision densenet models
-        target_layer_name (str): the name of layer with its hierarchical information. please refer to usages below.
-            target_layer_name = 'features'
-            target_layer_name = 'features_42'
-            target_layer_name = 'classifier'
-            target_layer_name = 'classifier_0'
-
-    Return:
-        target_layer: found layer. this layer will be hooked to get forward/backward pass information.
-    """
-    hierarchy = target_layer_name.split("_")
-
-    if len(hierarchy) >= 1:
-        target_layer = arch.features
-
-    if len(hierarchy) == 2:
-        target_layer = target_layer[int(hierarchy[1])]
-
-    return target_layer
-
-
-@register_layer_finder("alexnet")
-def find_alexnet_layer(arch, target_layer_name):
-    """Find alexnet layer to calculate GradCAM and GradCAM++
-
-    Args:
-        arch: default torchvision densenet models
-        target_layer_name (str): the name of layer with its hierarchical information. please refer to usages below.
-            target_layer_name = 'features'
-            target_layer_name = 'features_0'
-            target_layer_name = 'classifier'
-            target_layer_name = 'classifier_0'
-
-    Return:
-        target_layer: found layer. this layer will be hooked to get forward/backward pass information.
-    """
-    hierarchy = target_layer_name.split("_")
-
-    if len(hierarchy) >= 1:
-        target_layer = arch.features
-
-    if len(hierarchy) == 2:
-        target_layer = target_layer[int(hierarchy[1])]
-
-    return target_layer
-
-
-@register_layer_finder("squeezenet")
-def find_squeezenet_layer(arch, target_layer_name):
-    """Find squeezenet layer to calculate GradCAM and GradCAM++
-
-    Args:
-        arch: default torchvision densenet models
-        target_layer_name (str): the name of layer with its hierarchical information. please refer to usages below.
-            target_layer_name = 'features_12'
-            target_layer_name = 'features_12_expand3x3'
-            target_layer_name = 'features_12_expand3x3_activation'
-
-    Return:
-        target_layer: found layer. this layer will be hooked to get forward/backward pass information.
-    """
-    hierarchy = target_layer_name.split("_")
-    target_layer = arch._modules[hierarchy[0]]
-
-    if len(hierarchy) >= 2:
-        target_layer = target_layer._modules[hierarchy[1]]
-
-    if len(hierarchy) == 3:
-        target_layer = target_layer._modules[hierarchy[2]]
-
-    elif len(hierarchy) == 4:
-        target_layer = target_layer._modules[hierarchy[2] + "_" + hierarchy[3]]
-
-    return target_layer
-
-
-def denormalize(tensor, mean, std):
-    if not tensor.ndimension() == 4:
-        raise TypeError("tensor should be 4D")
-
-    mean = torch.FloatTensor(mean).view(1, 3, 1, 1).expand_as(tensor).to(tensor.device)
-    std = torch.FloatTensor(std).view(1, 3, 1, 1).expand_as(tensor).to(tensor.device)
-
-    return tensor.mul(std).add(mean)
-
-
-def normalize(tensor, mean, std):
-    if not tensor.ndimension() == 4:
-        raise TypeError("tensor should be 4D")
-
-    mean = torch.FloatTensor(mean).view(1, 3, 1, 1).expand_as(tensor).to(tensor.device)
-    std = torch.FloatTensor(std).view(1, 3, 1, 1).expand_as(tensor).to(tensor.device)
-
-    return tensor.sub(mean).div(std)
-
-
-class Normalize(object):
-    def __init__(self, mean, std):
-        self.mean = mean
-        self.std = std
-
-    def __call__(self, tensor):
-        return self.do(tensor)
-
-    def do(self, tensor):
-        return normalize(tensor, self.mean, self.std)
-
-    def undo(self, tensor):
-        return denormalize(tensor, self.mean, self.std)
-
-    def __repr__(self):
-        return self.__class__.__name__ + "(mean={0}, std={1})".format(
-            self.mean, self.std
-        )
+    cam = heatmap + img
+    cam = cam / np.max(cam)
+    return np.uint8(255 * cam)
 
 
 # ==============================================
-# https://github.com/1Konny/gradcam_plus_plus-pytorch
-# gradcam.py
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# guided_backprop.py
 # ==============================================
+import numpy as np
 import torch
-import torch.nn.functional as F
-
-# from .utils import layer_finders
+from torch.autograd import Function
 
 
-class GradCAM:
-    """Calculate GradCAM salinecy map.
+class GuidedBackpropReLU(Function):
+    @staticmethod
+    def forward(self, input_img):
+        positive_mask = (input_img > 0).type_as(input_img)
+        output = torch.addcmul(
+            torch.zeros(input_img.size()).type_as(input_img), input_img, positive_mask
+        )
+        self.save_for_backward(input_img, output)
+        return output
 
-    Args:
-        input: input image with shape of (1, 3, H, W)
-        class_idx (int): class index for calculating GradCAM.
-                If not specified, the class index that makes the highest model prediction score will be used.
-    Return:
-        mask: saliency map of the same spatial dimension with input
-        logit: model output
+    @staticmethod
+    def backward(self, grad_output):
+        input_img, output = self.saved_tensors
+        grad_input = None
+
+        positive_mask_1 = (input_img > 0).type_as(grad_output)
+        positive_mask_2 = (grad_output > 0).type_as(grad_output)
+        grad_input = torch.addcmul(
+            torch.zeros(input_img.size()).type_as(input_img),
+            torch.addcmul(
+                torch.zeros(input_img.size()).type_as(input_img),
+                grad_output,
+                positive_mask_1,
+            ),
+            positive_mask_2,
+        )
+        return grad_input
 
 
-    A simple example:
+class GuidedBackpropReLUModel:
+    def __init__(self, model, use_cuda):
+        self.model = model
+        self.model.eval()
+        self.cuda = use_cuda
+        if self.cuda:
+            self.model = model.cuda()
 
-        # initialize a model, model_dict and gradcam
-        resnet = torchvision.models.resnet101(pretrained=True)
-        resnet.eval()
-        gradcam = GradCAM.from_config(model_type='resnet', arch=resnet, layer_name='layer4')
+        def recursive_relu_apply(module_top):
+            for idx, module in module_top._modules.items():
+                recursive_relu_apply(module)
+                if module.__class__.__name__ == "ReLU":
+                    module_top._modules[idx] = GuidedBackpropReLU.apply
 
-        # get an image and normalize with mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
-        img = load_img()
-        normed_img = normalizer(img)
+        # replace ReLU with GuidedBackpropReLU
+        recursive_relu_apply(self.model)
 
-        # get a GradCAM saliency map on the class index 10.
-        mask, logit = gradcam(normed_img, class_idx=10)
+    def forward(self, input_img):
+        return self.model(input_img)
 
-        # make heatmap from mask and synthesize saliency map using heatmap and img
-        heatmap, cam_result = visualize_cam(mask, img)
+    def __call__(self, input_img, target_category=None):
+        if self.cuda:
+            input_img = input_img.cuda()
+
+        input_img = input_img.requires_grad_(True)
+
+        output = self.forward(input_img)
+
+        if target_category is None:
+            target_category = np.argmax(output.cpu().data.numpy())
+
+        one_hot = np.zeros((1, output.size()[-1]), dtype=np.float32)
+        one_hot[0][target_category] = 1
+        one_hot = torch.from_numpy(one_hot).requires_grad_(True)
+        if self.cuda:
+            one_hot = one_hot.cuda()
+
+        one_hot = torch.sum(one_hot * output)
+        one_hot.backward(retain_graph=True)
+
+        output = input_img.grad.cpu().data.numpy()
+        output = output[0, :, :, :]
+        output = output.transpose((1, 2, 0))
+        return output
+
+
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# activations_and_gradients.py
+# ==============================================
+class ActivationsAndGradients:
+    """ Class for extracting activations and
+    registering gradients from targetted intermediate layers """
+
+    def __init__(self, model, target_layer, reshape_transform):
+        self.model = model
+        self.gradients = []
+        self.activations = []
+        self.reshape_transform = reshape_transform
+
+        target_layer.register_forward_hook(self.save_activation)
+        target_layer.register_backward_hook(self.save_gradient)
+
+    def save_activation(self, module, input, output):
+        activation = output
+        if self.reshape_transform is not None:
+            activation = self.reshape_transform(activation)
+        self.activations.append(activation.cpu())
+
+    def save_gradient(self, module, grad_input, grad_output):
+        # Gradients are computed in reverse order
+        grad = grad_output[0]
+        if self.reshape_transform is not None:
+            grad = self.reshape_transform(grad)
+        self.gradients = [grad.cpu()] + self.gradients
+
+    def __call__(self, x):
+        self.gradients = []
+        self.activations = []
+        return self.model(x)
+
+
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# base_cam.py
+# ==============================================
+import cv2
+import numpy as np
+import torch
+
+# from pytorch_grad_cam.activations_and_gradients import ActivationsAndGradients
+
+
+class BaseCAM:
+    def __init__(self, model, target_layer, use_cuda=False, reshape_transform=None):
+        self.model = model.eval()
+        self.target_layer = target_layer
+        self.cuda = use_cuda
+        if self.cuda:
+            self.model = model.cuda()
+        self.reshape_transform = reshape_transform
+        self.activations_and_grads = ActivationsAndGradients(
+            self.model, target_layer, reshape_transform
+        )
+
+    def forward(self, input_img):
+        return self.model(input_img)
+
+    def get_cam_weights(self, input_tensor, target_category, activations, grads):
+        raise Exception("Not Implemented")
+
+    def get_loss(self, output, target_category):
+        return output[:, target_category]
+
+    def get_cam_image(self, input_tensor, target_category, activations, grads):
+        weights = self.get_cam_weights(
+            input_tensor, target_category, activations, grads
+        )
+        cam = np.zeros(activations.shape[1:], dtype=np.float32)
+        for i, w in enumerate(weights):
+            cam += w * activations[i, :, :]
+        return cam
+
+    def __call__(self, input_tensor, target_category=None):
+        if self.cuda:
+            input_tensor = input_tensor.cuda()
+
+        output = self.activations_and_grads(input_tensor)
+
+        if target_category is None:
+            target_category = np.argmax(output.cpu().data.numpy())
+
+        self.model.zero_grad()
+        loss = self.get_loss(output, target_category)
+        loss.backward(retain_graph=True)
+
+        activations = (
+            self.activations_and_grads.activations[-1].cpu().data.numpy()[0, :]
+        )
+        grads = self.activations_and_grads.gradients[-1].cpu().data.numpy()[0, :]
+        cam = self.get_cam_image(input_tensor, target_category, activations, grads)
+
+        cam = np.maximum(cam, 0)
+        cam = cv2.resize(cam, input_tensor.shape[2:][::-1])
+        cam = cam - np.min(cam)
+        cam = cam / np.max(cam)
+        return cam
+
+
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# grad_cam.py
+# ==============================================
+import cv2
+import numpy as np
+import torch
+
+# from pytorch_grad_cam.base_cam import BaseCAM
+
+
+class GradCAM(BaseCAM):
+    """GradCAM:	Weight the 2D activations by the average gradient.
+    平均勾配で2Dアクティベーションに重みを付け
     """
 
-    def __init__(self, arch: torch.nn.Module, target_layer: torch.nn.Module):
-        self.model_arch = arch
+    def __init__(self, model, target_layer, use_cuda=False, reshape_transform=None):
+        super(GradCAM, self).__init__(model, target_layer, use_cuda, reshape_transform)
 
-        self.gradients = dict()
-        self.activations = dict()
-
-        def backward_hook(module, grad_input, grad_output):
-            self.gradients["value"] = grad_output[0]
-
-        def forward_hook(module, input, output):
-            self.activations["value"] = output
-
-        target_layer.register_forward_hook(forward_hook)
-        target_layer.register_backward_hook(backward_hook)
-
-    @classmethod
-    def from_config(cls, arch: torch.nn.Module, model_type: str, layer_name: str):
-        target_layer = layer_finders[model_type](arch, layer_name)
-        return cls(arch, target_layer)
-
-    def saliency_map_size(self, *input_size):
-        device = next(self.model_arch.parameters()).device
-        self.model_arch(torch.zeros(1, 3, *input_size, device=device))
-        return self.activations["value"].shape[2:]
-
-    def forward(self, input, class_idx=None, retain_graph=False):
-        b, c, h, w = input.size()
-
-        logit = self.model_arch(input)
-        if class_idx is None:
-            score = logit[:, logit.max(1)[-1]].squeeze()
-        else:
-            score = logit[:, class_idx].squeeze()
-
-        self.model_arch.zero_grad()
-        score.backward(retain_graph=retain_graph)
-        gradients = self.gradients["value"]
-        activations = self.activations["value"]
-        b, k, u, v = gradients.size()
-
-        alpha = gradients.view(b, k, -1).mean(2)
-        # alpha = F.relu(gradients.view(b, k, -1)).mean(2)
-        weights = alpha.view(b, k, 1, 1)
-
-        saliency_map = (weights * activations).sum(1, keepdim=True)
-        saliency_map = F.relu(saliency_map)
-        saliency_map = F.upsample(
-            saliency_map, size=(h, w), mode="bilinear", align_corners=False
-        )
-        saliency_map_min, saliency_map_max = saliency_map.min(), saliency_map.max()
-        saliency_map = (
-            (saliency_map - saliency_map_min)
-            .div(saliency_map_max - saliency_map_min)
-            .data
-        )
-
-        return saliency_map, logit
-
-    def __call__(self, input, class_idx=None, retain_graph=False):
-        return self.forward(input, class_idx, retain_graph)
+    def get_cam_weights(self, input_tensor, target_category, activations, grads):
+        return np.mean(grads, axis=(1, 2))
 
 
-class GradCAMpp(GradCAM):
-    """Calculate GradCAM++ salinecy map.
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# grad_cam_plusplus.py
+# ==============================================
+import cv2
+import numpy as np
+import torch
 
-    Args:
-        input: input image with shape of (1, 3, H, W)
-        class_idx (int): class index for calculating GradCAM.
-                If not specified, the class index that makes the highest model prediction score will be used.
-    Return:
-        mask: saliency map of the same spatial dimension with input
-        logit: model output
+# from pytorch_grad_cam.base_cam import BaseCAM
 
 
-    A simple example:
-
-        # initialize a model, model_dict and gradcampp
-        resnet = torchvision.models.resnet101(pretrained=True)
-        resnet.eval()
-        gradcampp = GradCAMpp.from_config(model_type='resnet', arch=resnet, layer_name='layer4')
-
-        # get an image and normalize with mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)
-        img = load_img()
-        normed_img = normalizer(img)
-
-        # get a GradCAM saliency map on the class index 10.
-        mask, logit = gradcampp(normed_img, class_idx=10)
-
-        # make heatmap from mask and synthesize saliency map using heatmap and img
-        heatmap, cam_result = visualize_cam(mask, img)
+class GradCAMPlusPlus(BaseCAM):
+    """GradCAM++: Like GradCAM but uses second order gradients.
+    GradCAMと同様ですが、2次グラデーションを使用
     """
 
-    def forward(self, input, class_idx=None, retain_graph=False):
-        b, c, h, w = input.size()
+    def __init__(self, model, target_layer, use_cuda=False, reshape_transform=None):
+        super(GradCAMPlusPlus, self).__init__(
+            model, target_layer, use_cuda, reshape_transform
+        )
 
-        logit = self.model_arch(input)
-        if class_idx is None:
-            score = logit[:, logit.max(1)[-1]].squeeze()
+    def get_cam_weights(self, input_tensor, target_category, activations, grads):
+        grads_power_2 = grads ** 2
+        grads_power_3 = grads_power_2 * grads
+        # Equation 19 in https://arxiv.org/abs/1710.11063
+        sum_activations = np.sum(activations, axis=(1, 2))
+        eps = 0.000001
+        aij = grads_power_2 / (
+            2 * grads_power_2 + sum_activations[:, None, None] * grads_power_3 + eps
+        )
+
+        # Now bring back the ReLU from eq.7 in the paper,
+        # And zero out aijs where the activations are 0
+        aij = np.where(grads != 0, aij, 0)
+
+        weights = np.maximum(grads, 0) * aij
+        weights = np.sum(weights, axis=(1, 2))
+        return weights
+
+
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# xgrad_cam.py
+# ==============================================
+import cv2
+import numpy as np
+import torch
+
+# from pytorch_grad_cam.base_cam import BaseCAM
+
+
+class XGradCAM(BaseCAM):
+    """XGradCAM: Like GradCAM but scale the gradients by the normalized activations.
+    GradCAMと同様ですが、正規化されたアクティベーションによってグラデーションをスケーリング
+    """
+
+    def __init__(self, model, target_layer, use_cuda=False, reshape_transform=None):
+        super(XGradCAM, self).__init__(model, target_layer, use_cuda, reshape_transform)
+
+    def get_cam_weights(self, input_tensor, target_category, activations, grads):
+        sum_activations = np.sum(activations, axis=(1, 2))
+        eps = 1e-7
+        weights = grads * activations / (sum_activations[:, None, None] + eps)
+        weights = weights.sum(axis=(1, 2))
+        return weights
+
+
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# ablation_cam.py
+# ==============================================
+import cv2
+import numpy as np
+import torch
+
+# from pytorch_grad_cam.base_cam import BaseCAM
+
+
+class AblationLayer(torch.nn.Module):
+    def __init__(self, layer, reshape_transform, indices):
+        super(AblationLayer, self).__init__()
+
+        self.layer = layer
+        self.reshape_transform = reshape_transform
+        # The channels to zero out:
+        self.indices = indices
+
+    def forward(self, x):
+        self.__call__(x)
+
+    def __call__(self, x):
+        output = self.layer(x)
+
+        # Hack to work with ViT,
+        # Since the activation channels are last and not first like in CNNs
+        # Probably should remove it?
+        if self.reshape_transform is not None:
+            output = output.transpose(1, 2)
+
+        for i in range(output.size(0)):
+
+            # Commonly the minimum activation will be 0,
+            # And then it makes sense to zero it out.
+            # However depending on the architecture,
+            # If the values can be negative, we use very negative values
+            # to perform the ablation, deviating from the paper.
+            if torch.min(output) == 0:
+                output[i, self.indices[i], :] = 0
+            else:
+                ABLATION_VALUE = 1e5
+                output[i, self.indices[i], :] = torch.min(output) - ABLATION_VALUE
+
+        if self.reshape_transform is not None:
+            output = output.transpose(2, 1)
+
+        return output
+
+
+def replace_layer_recursive(model, old_layer, new_layer):
+    for name, layer in model._modules.items():
+        if layer == old_layer:
+            model._modules[name] = new_layer
+            return True
+        elif replace_layer_recursive(layer, old_layer, new_layer):
+            return True
+    return False
+
+
+class AblationCAM(BaseCAM):
+    """AblationCAM: Zero out activations and measure how the output drops (this repository includes a fast batched implementation)
+    アクティベーションをゼロにし、出力がどのように低下​​するかを測定します（このリポジトリには高速バッチ実装が含まれています）
+    """
+
+    def __init__(self, model, target_layer, use_cuda=False, reshape_transform=None):
+        super(AblationCAM, self).__init__(
+            model, target_layer, use_cuda, reshape_transform
+        )
+
+    def get_cam_weights(self, input_tensor, target_category, activations, grads):
+        with torch.no_grad():
+            original_score = self.model(input_tensor)[0, target_category].cpu().numpy()
+
+        ablation_layer = AblationLayer(
+            self.target_layer, self.reshape_transform, indices=[]
+        )
+        replace_layer_recursive(self.model, self.target_layer, ablation_layer)
+
+        weights = []
+
+        if hasattr(self, "batch_size"):
+            BATCH_SIZE = self.batch_size
         else:
-            score = logit[:, class_idx].squeeze()
+            BATCH_SIZE = 32
 
-        self.model_arch.zero_grad()
-        score.backward(retain_graph=retain_graph)
-        gradients = self.gradients["value"]  # dS/dA
-        activations = self.activations["value"]  # A
-        b, k, u, v = gradients.size()
+        with torch.no_grad():
+            batch_tensor = input_tensor.repeat(BATCH_SIZE, 1, 1, 1)
+            for i in range(0, activations.shape[0], BATCH_SIZE):
+                ablation_layer.indices = list(range(i, i + BATCH_SIZE))
 
-        alpha_num = gradients.pow(2)
-        alpha_denom = alpha_num.mul(2) + activations.mul(gradients.pow(3)).view(
-            b, k, u * v
-        ).sum(-1).view(b, k, 1, 1)
-        alpha_denom = torch.where(
-            alpha_denom != 0.0, alpha_denom, torch.ones_like(alpha_denom)
+                if i + BATCH_SIZE > activations.shape[0]:
+                    keep = i + BATCH_SIZE - activations.shape[0] - 1
+                    batch_tensor = batch_tensor[:keep]
+                    ablation_layer.indices = ablation_layer.indices[:keep]
+                weights.extend(
+                    self.model(batch_tensor)[:, target_category].cpu().numpy()
+                )
+
+        weights = np.float32(weights)
+        weights = (original_score - weights) / original_score
+
+        # replace the model back to the original state
+        replace_layer_recursive(self.model, ablation_layer, self.target_layer)
+        return weights
+
+
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# score_cam.py
+# ==============================================
+import cv2
+import numpy as np
+import torch
+
+# from pytorch_grad_cam.base_cam import BaseCAM
+
+
+class ScoreCAM(BaseCAM):
+    """ScoreCAM: Perbutate the image by the scaled activations and measure how the output drops.
+    スケーリングされたアクティベーションによって画像にパービュートし、出力がどのように低下​​するかを測定
+    """
+
+    def __init__(self, model, target_layer, use_cuda=False, reshape_transform=None):
+        super(ScoreCAM, self).__init__(
+            model, target_layer, use_cuda, reshape_transform=reshape_transform
         )
 
-        alpha = alpha_num.div(alpha_denom + 1e-7)
-        positive_gradients = F.relu(
-            score.exp() * gradients
-        )  # ReLU(dY/dA) == ReLU(exp(S)*dS/dA))
-        weights = (
-            (alpha * positive_gradients).view(b, k, u * v).sum(-1).view(b, k, 1, 1)
-        )
+    def get_cam_weights(self, input_tensor, target_category, activations, grads):
+        with torch.no_grad():
+            upsample = torch.nn.UpsamplingBilinear2d(size=input_tensor.shape[2:])
+            activation_tensor = torch.from_numpy(activations).unsqueeze(0)
+            if self.cuda:
+                activation_tensor = activation_tensor.cuda()
 
-        saliency_map = (weights * activations).sum(1, keepdim=True)
-        saliency_map = F.relu(saliency_map)
-        saliency_map = F.upsample(
-            saliency_map, size=(h, w), mode="bilinear", align_corners=False
-        )
-        saliency_map_min, saliency_map_max = saliency_map.min(), saliency_map.max()
-        saliency_map = (
-            (saliency_map - saliency_map_min)
-            .div(saliency_map_max - saliency_map_min)
-            .data
-        )
+            upsampled = upsample(activation_tensor)
+            upsampled = upsampled[
+                0,
+            ]
 
-        return saliency_map, logit
+            maxs = upsampled.view(upsampled.size(0), -1).max(dim=-1)[0]
+            mins = upsampled.view(upsampled.size(0), -1).min(dim=-1)[0]
+            maxs, mins = maxs[:, None, None], mins[:, None, None]
+            upsampled = (upsampled - mins) / (maxs - mins)
+
+            input_tensors = input_tensor * upsampled[:, None, :, :]
+
+            if hasattr(self, "batch_size"):
+                BATCH_SIZE = self.batch_size
+            else:
+                BATCH_SIZE = 16
+
+            scores = []
+            for i in range(0, input_tensors.size(0), BATCH_SIZE):
+                batch = input_tensors[i : i + BATCH_SIZE, :]
+                outputs = self.model(batch).cpu().numpy()[:, target_category]
+                scores.append(outputs)
+            scores = torch.from_numpy(np.concatenate(scores))
+            weights = torch.nn.Softmax(dim=-1)(scores).numpy()
+            return weights
+
+
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master/pytorch_grad_cam
+# eigen_cam.py
+# ==============================================
+import cv2
+import cv2
+import numpy as np
+import torch
+
+# from pytorch_grad_cam.base_cam import BaseCAM
+
+# https://arxiv.org/abs/2008.00299
+class EigenCAM(BaseCAM):
+    """EigenCAM:Takes the first principle component of the 2D Activations (no class discrimination, but seems to give great results).
+    2Dアクティベーションの最初の主成分を取ります（クラスの識別はありませんが、素晴らしい結果が得られるようです）
+    """
+
+    def __init__(self, model, target_layer, use_cuda=False, reshape_transform=None):
+        super(EigenCAM, self).__init__(model, target_layer, use_cuda, reshape_transform)
+
+    def get_cam_image(self, input_tensor, target_category, activations, grads):
+        reshaped_activations = (
+            (activations).reshape(activations.shape[0], -1).transpose()
+        )
+        # Centering before the SVD seems to be important here,
+        # Otherwise the image returned is negative
+        reshaped_activations = reshaped_activations - reshaped_activations.mean(axis=0)
+        U, S, VT = np.linalg.svd(reshaped_activations, full_matrices=True)
+        projection = reshaped_activations @ VT[0, :]
+        projection = projection.reshape(activations.shape[1:])
+        return projection
+
+
+# ==============================================
+# https://github.com/jacobgil/pytorch-grad-cam/tree/master
+# cam.py
+# ==============================================
+import argparse
+import cv2
+import numpy as np
+import torch
+from torchvision import models
+
+# from pytorch_grad_cam import (GradCAM, ScoreCAM, GradCAMPlusPlus, AblationCAM, XGradCAM, EigenCAM, EigenGradCAM,)
+# from pytorch_grad_cam import GuidedBackpropReLUModel
+# from pytorch_grad_cam.utils.image import (show_cam_on_image, deprocess_image, preprocess_image,)
+
+
+def get_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--use-cuda",
+        action="store_true",
+        default=False,
+        help="Use NVIDIA GPU acceleration",
+    )
+    # parser.add_argument("--image-path", type=str, default="./image/dog.jpg", help="Input image path")
+    parser.add_argument(
+        "--method",
+        type=str,
+        default="gradcam",
+        help="Can be gradcam/gradcam++/scorecam/xgradcam/ablationcam",
+    )
+
+    args = parser.parse_args()
+    args.use_cuda = args.use_cuda and torch.cuda.is_available()
+    # if args.use_cuda:
+    #    print("Using GPU for acceleration")
+    # else:
+    #    print("Using CPU for computation")
+
+    return args
+
+
+def cam_main(args, model, target_layer, cv2_img, target_category=None):
+    """ python cam.py -image-path <path_to_image>
+    Example usage of loading an image, and computing:
+        1. CAM
+        2. Guided Back Propagation
+        3. Combining both
+    """
+    methods = {
+        "gradcam": GradCAM,
+        "scorecam": ScoreCAM,
+        "gradcam++": GradCAMPlusPlus,
+        "ablationcam": AblationCAM,
+        "xgradcam": XGradCAM,
+        "eigencam": EigenCAM,
+        # "eigengradcam": EigenGradCAM,
+    }
+
+    # models.resnet50(pretrained=True)
+
+    # Choose the target layer you want to compute the visualization for.
+    # Usually this will be the last convolutional layer in the model.
+    # Some common choices can be:
+    # Resnet18 and 50: model.layer4[-1]
+    # VGG, densenet161: model.features[-1]
+    # mnasnet1_0: model.layers[-1]
+    # You can print the model to help chose the layer
+    # target_layer = model.layer4[-1]
+
+    if args.method not in methods:
+        raise Exception(f"Method {args.method} not implemented")
+
+    cam = methods[args.method](
+        model=model, target_layer=target_layer, use_cuda=args.use_cuda
+    )
+
+    # rgb_img = cv2.imread(args.image_path, 1)[:, :, ::-1]
+    rgb_img = cv2_img[:, :, ::-1]
+    rgb_img = np.float32(rgb_img) / 255
+    input_tensor = preprocess_image(
+        rgb_img, mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
+    )
+
+    # If None, returns the map for the highest scoring category.
+    # Otherwise, targets the requested category.
+    # target_category = None
+
+    # AblationCAM and ScoreCAM have batched implementations.
+    # You can override the internal batch size for faster computation.
+    cam.batch_size = 32
+
+    grayscale_cam = cam(input_tensor=input_tensor, target_category=target_category)
+
+    cam_image = show_cam_on_image(rgb_img, grayscale_cam)
+
+    # gb_model = GuidedBackpropReLUModel(model=model, use_cuda=args.use_cuda)
+    # gb = gb_model(input_tensor, target_category=target_category)
+
+    # cam_mask = cv2.merge([grayscale_cam, grayscale_cam, grayscale_cam])
+    # cam_gb = deprocess_image(cam_mask * gb)
+    # gb = deprocess_image(gb)
+
+    # cv2.imwrite(f"{args.method}_cam.jpg", cam_image)
+    # cv2.imwrite(f"{args.method}_gb.jpg", gb)
+    # cv2.imwrite(f"{args.method}_cam_gb.jpg", cam_gb)
+
+    return cam_image
 
 
 # ==============================================
@@ -444,15 +660,38 @@ import streamlit as st
 import torch
 from torchvision import models, transforms
 from PIL import Image
-import albumentations as A
-from albumentations.pytorch.transforms import ToTensorV2
 
 
 @st.cache(allow_output_mutation=True)
 def load_model():
     # model = models.resnet101(pretrained=True)
-    model = models.mobilenet_v2(pretrained=True)
-    return model
+    # model = models.resnet50(pretrained=True)
+    model = models.resnet18(pretrained=True)
+    # model = models.mobilenet_v2(pretrained=True)
+
+    target_layer = model.layer4[-1]
+
+    return model, target_layer
+
+
+def load_file_up_image(file_up, size=224):
+    pillow_img = Image.open(file_up)
+    pillow_img = pillow_img.resize((size, size)) if size is not None else pillow_img
+    cv2_img = pil2cv(pillow_img)
+    return pillow_img, cv2_img
+
+
+def pil2cv(pillow_img):
+    """ PIL型 -> OpenCV型
+    https://qiita.com/derodero24/items/f22c22b22451609908ee"""
+    new_image = np.array(pillow_img, dtype=np.uint8)
+    if new_image.ndim == 2:  # モノクロ
+        pass
+    elif new_image.shape[2] == 3:  # カラー
+        new_image = cv2.cvtColor(new_image, cv2.COLOR_RGB2BGR)
+    elif new_image.shape[2] == 4:  # 透過
+        new_image = cv2.cvtColor(new_image, cv2.COLOR_RGBA2BGRA)
+    return new_image
 
 
 def preprocessing_image(image_pil_array: "PIL.Image"):
@@ -470,11 +709,10 @@ def preprocessing_image(image_pil_array: "PIL.Image"):
     return batch_t
 
 
-def predict(image_path):
-    img = Image.open(image_path)
-    batch_t = preprocessing_image(img)
+def predict(args, pillow_img, cv2_img):
+    batch_t = preprocessing_image(pillow_img)
 
-    model = load_model()
+    model, target_layer = load_model()
     model.eval()
     out = model(batch_t)
 
@@ -485,53 +723,13 @@ def predict(image_path):
     _, indices = torch.sort(out, descending=True)
     top5 = [(classes[idx], prob[idx].item()) for idx in indices[0][:5]]
 
-    result_pp = _gradcam(model, img)
-
-    return top5, result_pp
-
-
-def _gradcam(model, image_pil_array: "PIL.Image"):
-    """grad-cam++"""
-    target_layer = model.features  # mobilenet_v2
-
-    img_cv2 = pil2cv(image_pil_array)
-
-    img = img_cv2 / 255
-    a_transform = A.Compose([A.Resize(224, 224, p=1.0), ToTensorV2(p=1.0)], p=1.0)
-    img = a_transform(image=img)["image"].unsqueeze(0)
-
-    a_transform = A.Compose(
-        [
-            A.Resize(224, 224, p=1.0),
-            A.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225],
-                max_pixel_value=255.0,
-                p=1.0,
-            ),
-            ToTensorV2(p=1.0),
-        ],
-        p=1.0,
+    top1_id = top5[0][0].split(",")[0]
+    cam_image = cam_main(
+        args, model, target_layer, cv2_img, target_category=int(top1_id)
     )
-    batch_t = a_transform(image=img_cv2)["image"].unsqueeze(0)
+    cam_image = cv2.cvtColor(cam_image, cv2.COLOR_BGR2RGB)
 
-    gradcam_pp = GradCAMpp(model, target_layer)
-    mask_pp, logit = gradcam_pp(batch_t)
-    heatmap_pp, result_pp = visualize_cam(mask_pp, img)
-    return result_pp
-
-
-def pil2cv(image):
-    """ PIL型 -> OpenCV型
-    https://qiita.com/derodero24/items/f22c22b22451609908ee"""
-    new_image = np.array(image, dtype=np.uint8)
-    if new_image.ndim == 2:  # モノクロ
-        pass
-    elif new_image.shape[2] == 3:  # カラー
-        new_image = cv2.cvtColor(new_image, cv2.COLOR_RGB2BGR)
-    elif new_image.shape[2] == 4:  # 透過
-        new_image = cv2.cvtColor(new_image, cv2.COLOR_RGBA2BGRA)
-    return new_image
+    return top5, cam_image
 
 
 def main():
@@ -539,24 +737,53 @@ def main():
     st.title("Simple Image Classification App")
     st.write("")
 
+    args = get_args()
+
+    # ファイルupload
     file_up = st.file_uploader("Upload an image", type="jpg")
 
-    if file_up is not None:
-        image = Image.open(file_up)
-        st.image(image, caption="Uploaded Image.", use_column_width=True)
+    # ラジオボタン
+    now_st_method = ""
+    st_method = st.radio(
+        "Select Class Activation Map method",
+        (
+            "gradcam",
+            "gradcam++",
+            "xgradcam",
+            "ablationcam",
+            "scorecam",
+            "eigencam",
+            # "eigengradcam",
+        ),
+    )
+    args.__setattr__("method", st_method)  # args.method
+
+    def run():
+        pillow_img, cv2_img = load_file_up_image(file_up)
+
+        st.image(
+            pillow_img,
+            caption="Uploaded Image. Resize (224, 224).",
+            use_column_width=True,
+        )
 
         st.write("")
         st.write("Just a second...")
-        labels, result_pp = predict(file_up)
+        labels, cam_image = predict(args, pillow_img, cv2_img)
         st.image(
-            result_pp.numpy().transpose(1, 2, 0),
-            caption="Model Attention(Grad-CAM++).",
+            cam_image.transpose(0, 1, 2),
+            caption="Class Activation Map method: " + st_method,
             use_column_width=True,
         )
 
         # print out the top 5 prediction labels with scores
         for i in labels:
             st.write("Prediction (index, name)", i[0], ",   Score: ", round(i[1], 2))
+
+        now_st_method = st_method
+
+    if file_up is not None and now_st_method != st_method:
+        run()
     else:
         img_url = "https://github.com/riron1206/image_classification_streamlit_app/blob/master/image/dog.jpg?raw=true"
         st.image(

@@ -6,3 +6,6 @@ torch
 torchvision
 albumentations
 opencv-python-headless
+typing-extensions
+dataclasses
+dicom-factory
