@@ -744,7 +744,7 @@ def main():
 
     # ラジオボタン
     now_st_method = ""
-    st_method = st.radio(
+    st_method = st.sidebar.radio(
         "Select Class Activation Map method",
         (
             "gradcam",
