@@ -570,6 +570,7 @@ def get_args():
         default="gradcam",
         help="Can be gradcam/gradcam++/scorecam/xgradcam/ablationcam",
     )
+    parser.add_argument("--model", type=str, default="resnet18")  # 追加
 
     args = parser.parse_args()
     args.use_cuda = args.use_cuda and torch.cuda.is_available()
@@ -663,14 +664,17 @@ from PIL import Image
 
 
 @st.cache(allow_output_mutation=True)
-def load_model():
-    # model = models.resnet101(pretrained=True)
-    # model = models.resnet50(pretrained=True)
-    model = models.resnet18(pretrained=True)
+def load_model(model):
+    if model == "resnet18":
+        model = models.resnet18(pretrained=True)
+        target_layer = model.layer4[-1]
+    elif model == "resnet50":
+        model = models.resnet50(pretrained=True)
+        target_layer = model.layer4[-1]
+    elif model == "resnet101":
+        model = models.resnet101(pretrained=True)
+        target_layer = model.layer4[-1]
     # model = models.mobilenet_v2(pretrained=True)
-
-    target_layer = model.layer4[-1]
-
     return model, target_layer
 
 
@@ -712,7 +716,7 @@ def preprocessing_image(image_pil_array: "PIL.Image"):
 def predict(args, pillow_img, cv2_img):
     batch_t = preprocessing_image(pillow_img)
 
-    model, target_layer = load_model()
+    model, target_layer = load_model(args.model)
     model.eval()
     out = model(batch_t)
 
@@ -742,7 +746,13 @@ def main():
     # ファイルupload
     file_up = st.file_uploader("Upload an image", type="jpg")
 
-    # ラジオボタン
+    # サイドバー ラジオボタン
+    st_model = st.sidebar.radio(
+        "Select ImageNet model", ("resnet18", "resnet50", "resnet101",),
+    )
+    args.__setattr__("model", st_model)
+
+    # サイドバー ラジオボタン
     now_st_method = ""
     st_method = st.sidebar.radio(
         "Select Class Activation Map method",
