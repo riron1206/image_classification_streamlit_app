@@ -768,7 +768,7 @@ def main():
         )
 
         st.write("")
-        st.write("Just a second...")
+        # st.write("Just a second...")
         labels, cam_image = predict(args, pillow_img, cv2_img)
         st.image(
             cam_image.transpose(0, 1, 2),
@@ -777,6 +777,7 @@ def main():
         )
 
         # print out the top 5 prediction labels with scores
+        # 1位だけにする
         for i in labels[:1]:
             st.write("Prediction (index, name)", i[0], ",   Score: ", round(i[1], 2))
 
