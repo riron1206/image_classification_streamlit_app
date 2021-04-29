@@ -10,4 +10,5 @@
 ---------------------------------------------
 
 ##### References:
-- https://github.com/1Konny/gradcam_plus_plus-pytorch
+- https://github.com/jacobgil/pytorch-grad-cam
+
