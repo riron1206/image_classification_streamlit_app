@@ -1795,7 +1795,7 @@ def main():
     args.__setattr__("method", st_method)  # args.method
 
     # サイドバー ラジオボタン
-    st_is_jp_class = st.sidebar.radio("予測のクラス名を日本語にするか", ("True", "False",))
+    st_is_jp_class = st.sidebar.radio("予測のクラス名を日本語にする", ("True", "False",))
 
     def run():
         pillow_img, cv2_img = load_file_up_image(file_up)
