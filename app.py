@@ -794,9 +794,14 @@ def main():
         # print out the top 5 prediction labels with scores
         # 1位だけにする
         for i in labels[:1]:
-            st.write(
-                "Prediction (index, name)", i[0], ",   Score: ", round(i[1], 1), " %"
-            )
+            print(type(i[0]))
+            class_id = int(i[0].split(", ")[0])
+            class_name = i[0].split(", ")[1]
+            # st.markdown("Prediction (index, name)**", str(i[0]), "**")
+            st.write("# Prediction")
+            st.write(f"## class name: **{class_name}** (imagenet id: {str(class_id)})")
+            st.write("## score: ", round(i[1], 1), " %")
+            # st.write("# Prediction (index, name)", i[0], ",   Score: ", round(i[1], 1), " %")
 
         now_st_method = st_method
 
