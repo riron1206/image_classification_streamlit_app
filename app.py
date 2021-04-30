@@ -679,7 +679,7 @@ def load_model(model):
 
 
 def load_file_up_image(file_up, size=224):
-    pillow_img = Image.open(file_up)
+    pillow_img = Image.open(file_up).convert("RGB")
     pillow_img = pillow_img.resize((size, size)) if size is not None else pillow_img
     cv2_img = pil2cv(pillow_img)
     return pillow_img, cv2_img
@@ -744,7 +744,7 @@ def main():
     args = get_args()
 
     # ファイルupload
-    file_up = st.file_uploader("Upload an image", type="jpg")
+    file_up = st.file_uploader("Upload an image", type=["png", "jpg", "jpeg"])
 
     # サイドバー ラジオボタン
     st_model = st.sidebar.radio(
