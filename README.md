@@ -7,6 +7,13 @@
 
 - デプロイ方法参考: https://tech.ledge.co.jp/entry/2020/10/20/120000
 
+
+
+#### ライブラリ(pytorch)のサイズがでかいためか？heroku にデプロイはできなかった
+- heroku デプロイ時のエラーメッセージ: Compiled slug size: 1G is too large (max is 500M).
+
+  
+
 ---------------------------------------------
 
 ##### References:
