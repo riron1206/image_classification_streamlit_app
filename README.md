@@ -14,7 +14,9 @@
 
 sourceのwhlファイルからpytorch installするようにherokuでもいけた
 
-- requirements_heroku.txt を使う必要がある。streamlit share との共存はできなかった…
+- **requirements_heroku.txt を使う必要がある。streamlit share との共存はできなかった…**
+- heroku でデプロイするためのその他ファイル: setup.sh, Procfile
+- heroku でデプロイする方法参考: https://qiita.com/sho7650/items/ebd87c5dc2c4c7abb8f0
 
 
 
