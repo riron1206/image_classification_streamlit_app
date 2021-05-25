@@ -11,7 +11,7 @@
 
 -------------------------------------------------------------------------------------------------------------------------------
 
-#### heroku でデプロイ 
+### heroku でデプロイ 
 
 ~~ライブラリ(pytorch)のサイズがでかいためか？heroku にデプロイはできなかった~~
 ~~heroku デプロイ時のエラーメッセージ: Compiled slug size: 1G is too large (max is 500M).~~
@@ -26,7 +26,7 @@ sourceのwhlファイルからpytorch install したらherokuでもデプロイ�
 
   - 「heroku」ブランチ指定したらデプロイできる
 
-  ![heroku](C:\Users\81908\MyGitHub\image_classification_streamlit_app\image\heroku.png)
+  ![heroku](image/heroku.png)
 
   - heroku でデプロイする方法参考: https://qiita.com/sho7650/items/ebd87c5dc2c4c7abb8f0
 
