@@ -11,7 +11,10 @@
 
 ~~ライブラリ(pytorch)のサイズがでかいためか？heroku にデプロイはできなかった~~
 ~~heroku デプロイ時のエラーメッセージ: Compiled slug size: 1G is too large (max is 500M).~~
-sourceのwhlファイルからpytorch installするようにherokuでもいけた(requirements_heroku.txt)
+
+sourceのwhlファイルからpytorch installするようにherokuでもいけた
+
+- requirements_heroku.txt を使う必要がある。streamlit share との共存はできなかった…
 
 
 
