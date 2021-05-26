@@ -1797,6 +1797,10 @@ def main():
     # サイドバー ラジオボタン
     st_is_jp_class = st.sidebar.radio("予測のクラス名を日本語にする", ("True", "False",))
 
+    # サイドバー
+    st.sidebar.write("GPU Not available on hosted demo, try on your local!")
+    st.sidebar.markdown("Clone Demo [Code](https://github.com/riron1206/image_classification_streamlit_app)")
+
     def run():
         pillow_img, cv2_img = load_file_up_image(file_up)
 
